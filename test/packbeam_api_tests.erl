@@ -645,6 +645,134 @@ packbeam_create_prune_supervisor_callback_from_avm_test() ->
 
     ok.
 
+packbeam_create_from_binaries_simple_test() ->
+    Inputs = [
+        {test_beam_path("a.beam"), read_binary(test_beam_path("a.beam"))},
+        {test_beam_path("b.beam"), read_binary(test_beam_path("b.beam"))},
+        {test_beam_path("c.beam"), read_binary(test_beam_path("c.beam"))}
+    ],
+    ?assertMatch(
+        {ok, _},
+        packbeam_api:create_from_binaries(Inputs)
+    ),
+    {ok, AVMBinary} = packbeam_api:create_from_binaries(Inputs),
+    ?assert(is_binary(AVMBinary)),
+    AVMFile = dest_dir("packbeam_create_from_binaries_simple_test.avm"),
+    ok = file:write_file(AVMFile, AVMBinary),
+    ParsedFiles = packbeam_api:list(AVMFile),
+    ?assert(is_list(ParsedFiles)),
+    ?assertEqual(3, length(ParsedFiles)),
+    ?assert(parsed_file_contains_module(a, ParsedFiles)),
+    ?assert(parsed_file_contains_module(b, ParsedFiles)),
+    ?assert(parsed_file_contains_module(c, ParsedFiles)),
+    ok.
+
+packbeam_create_from_binaries_with_normal_file_test() ->
+    NormalData = <<"hello world">>,
+    Inputs = [
+        {test_beam_path("a.beam"), read_binary(test_beam_path("a.beam"))},
+        {"test/priv/data.txt", NormalData}
+    ],
+    {ok, AVMBinary} = packbeam_api:create_from_binaries(Inputs),
+    AVMFile = dest_dir("packbeam_create_from_binaries_with_normal_file_test.avm"),
+    ok = file:write_file(AVMFile, AVMBinary),
+    ParsedFiles = packbeam_api:list(AVMFile),
+    ?assertEqual(2, length(ParsedFiles)),
+    [_BeamFile, DataFile] = ParsedFiles,
+    ?assertNot(is_beam(DataFile)),
+    ?assertMatch("test/priv/data.txt", get_module_name(DataFile)),
+    ok.
+
+packbeam_create_from_binaries_lib_option_test() ->
+    Inputs = [
+        {test_beam_path("a.beam"), read_binary(test_beam_path("a.beam"))},
+        {test_beam_path("b.beam"), read_binary(test_beam_path("b.beam"))}
+    ],
+    {ok, AVMBinary} = packbeam_api:create_from_binaries(Inputs, #{lib => true}),
+    AVMFile = dest_dir("packbeam_create_from_binaries_lib_option_test.avm"),
+    ok = file:write_file(AVMFile, AVMBinary),
+    ParsedFiles = packbeam_api:list(AVMFile),
+    ?assertEqual(2, length(ParsedFiles)),
+    lists:foreach(
+        fun(ParsedFile) ->
+            ?assertNot(is_start(ParsedFile))
+        end,
+        ParsedFiles
+    ),
+    ok.
+
+packbeam_create_from_binaries_prune_test() ->
+    Inputs = [
+        {test_beam_path("a.beam"), read_binary(test_beam_path("a.beam"))},
+        {test_beam_path("b.beam"), read_binary(test_beam_path("b.beam"))},
+        {test_beam_path("c.beam"), read_binary(test_beam_path("c.beam"))},
+        {test_beam_path("d.beam"), read_binary(test_beam_path("d.beam"))}
+    ],
+    {ok, AVMBinary} = packbeam_api:create_from_binaries(Inputs, #{prune => true}),
+    AVMFile = dest_dir("packbeam_create_from_binaries_prune_test.avm"),
+    ok = file:write_file(AVMFile, AVMBinary),
+    ParsedFiles = packbeam_api:list(AVMFile),
+    ?assert(is_list(ParsedFiles)),
+    %% pruning should keep fewer than all 4 modules
+    ?assert(length(ParsedFiles) < 4),
+    ok.
+
+packbeam_create_from_binaries_avm_input_test() ->
+    %% First create an AVM via the normal path-based API
+    LibAVMFile = dest_dir("packbeam_create_from_binaries_avm_input_lib.avm"),
+    ok = packbeam_api:create(
+        LibAVMFile,
+        [test_beam_path("c.beam"), test_beam_path("d.beam")],
+        #{lib => true}
+    ),
+    AVMData = read_binary(LibAVMFile),
+    %% Now use it as binary input alongside another beam
+    Inputs = [
+        {test_beam_path("a.beam"), read_binary(test_beam_path("a.beam"))},
+        {LibAVMFile, AVMData}
+    ],
+    {ok, AVMBinary} = packbeam_api:create_from_binaries(Inputs),
+    AVMFile = dest_dir("packbeam_create_from_binaries_avm_input_test.avm"),
+    ok = file:write_file(AVMFile, AVMBinary),
+    ParsedFiles = packbeam_api:list(AVMFile),
+    ?assert(is_list(ParsedFiles)),
+    ?assert(parsed_file_contains_module(a, ParsedFiles)),
+    ?assert(parsed_file_contains_module(c, ParsedFiles)),
+    ?assert(parsed_file_contains_module(d, ParsedFiles)),
+    ok.
+
+packbeam_create_from_source_text_test() ->
+    %% Compile two Erlang modules from source text entirely in memory,
+    %% then pack them into an AVM binary without touching the filesystem.
+    Src1 =
+        "-module(greet).\n"
+        "-export([start/0, hello/1]).\n"
+        "start() -> hello(world).\n"
+        "hello(Name) -> {hello, Name}.\n",
+    Src2 =
+        "-module(util).\n"
+        "-export([id/1]).\n"
+        "id(X) -> X.\n",
+    {ok, greet, GreetBeam} = compile_source(Src1),
+    {ok, util, UtilBeam} = compile_source(Src2),
+    Inputs = [
+        {"greet.beam", GreetBeam},
+        {"util.beam", UtilBeam}
+    ],
+    {ok, AVMBinary} = packbeam_api:create_from_binaries(Inputs),
+    ?assert(is_binary(AVMBinary)),
+    %% Verify the AVM by writing to a temp file and listing contents
+    AVMFile = dest_dir("packbeam_create_from_source_text_test.avm"),
+    ok = file:write_file(AVMFile, AVMBinary),
+    ParsedFiles = packbeam_api:list(AVMFile),
+    ?assertEqual(2, length(ParsedFiles)),
+    ?assert(parsed_file_contains_module(greet, ParsedFiles)),
+    ?assert(parsed_file_contains_module(util, ParsedFiles)),
+    [GreetFile | _] = ParsedFiles,
+    ?assert(is_beam(GreetFile)),
+    ?assert(is_start(GreetFile)),
+    ok.
+
 file_exists(Path) ->
     filelib:is_file(Path).
 
@@ -684,3 +812,27 @@ parsed_file_contains_module(Module, ParsedFiles) ->
 create_scratch_dir(Name) ->
     ok = filelib:ensure_dir(?BUILD_DIR ++ "/" ++ Name ++ "/" ++ "dummy"),
     ?BUILD_DIR ++ "/" ++ Name.
+
+read_binary(Path) ->
+    {ok, Data} = file:read_file(Path),
+    Data.
+
+%% Compile an Erlang source string entirely in memory.
+%% Returns {ok, Module, BeamBinary} or {error, Reason}.
+compile_source(SrcText) ->
+    Forms = scan_and_parse_forms(SrcText, {1, 1}),
+    compile:forms(Forms, []).
+
+%% Tokenize and parse Erlang forms from a source string using the
+%% continuation-based scanner (erl_scan:tokens/3), which correctly
+%% handles all Erlang syntax including records, macros, etc.
+scan_and_parse_forms(Remaining, Loc) ->
+    case erl_scan:tokens([], Remaining, Loc) of
+        {done, {ok, Tokens, EndLoc}, Rest} ->
+            {ok, Form} = erl_parse:parse_form(Tokens),
+            [Form | scan_and_parse_forms(Rest, EndLoc)];
+        {done, {eof, _}, _} ->
+            [];
+        {more, _} ->
+            []
+    end.

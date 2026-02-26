@@ -25,7 +25,13 @@
 -module(packbeam_api).
 
 %% API exports
--export([create/2, create/3, create/4, create/5, list/1, extract/3, delete/3]).
+-export([
+    create/2, create/3, create/4, create/5,
+    create_from_binaries/1, create_from_binaries/2,
+    list/1,
+    extract/3,
+    delete/3
+]).
 
 %% AVM Entry functions
 -export([is_beam/1, is_entrypoint/1, get_element_name/1, get_element_data/1, get_element_module/1]).
@@ -50,6 +56,7 @@
 -opaque avm_element() :: [atom() | {atom(), term()}].
 -type path() :: string().
 -type avm_element_name() :: string().
+-type input_binary() :: {Name :: string(), Data :: binary()}.
 -type options() :: #{
     prune => boolean(),
     lib => boolean(),
@@ -62,6 +69,7 @@
     path/0,
     avm_element/0,
     avm_element_name/0,
+    input_binary/0,
     options/0
 ]).
 
@@ -136,6 +144,59 @@ create(OutputPath, InputPaths, Options) ->
             _ -> ParsedFiles
         end
     ).
+
+%%-----------------------------------------------------------------------------
+%% @param   InputBinaries a list of `{Name, Data}' pairs where `Name' determines
+%%          the file type (.beam, .avm, or other) and `Data' is the file contents
+%% @returns `{ok, AVMBinary}' where `AVMBinary' is the generated AVM file as a binary.
+%% @doc     Create an AVM file in memory from binary inputs.
+%%
+%%          Equivalent to `create_from_binaries(InputBinaries, DefaultOptions)'
+%% @end
+%%-----------------------------------------------------------------------------
+-spec create_from_binaries(
+    InputBinaries :: [input_binary()]
+) -> {ok, binary()} | {error, Reason :: term()}.
+create_from_binaries(InputBinaries) ->
+    create_from_binaries(InputBinaries, ?DEFAULT_OPTIONS).
+
+%%-----------------------------------------------------------------------------
+%% @param   InputBinaries a list of `{Name, Data}' pairs where `Name' determines
+%%          the file type (.beam, .avm, or other) and `Data' is the file contents
+%% @param   Options creation options
+%% @returns `{ok, AVMBinary}' where `AVMBinary' is the generated AVM file as a binary.
+%% @doc     Create an AVM file in memory from binary inputs.
+%%
+%%          This function behaves identically to `create/3' but accepts in-memory
+%%          binaries instead of file paths and returns the AVM as a binary rather
+%%          than writing it to disk.
+%% @end
+%%-----------------------------------------------------------------------------
+-spec create_from_binaries(
+    InputBinaries :: [input_binary()],
+    Options :: options()
+) -> {ok, binary()} | {error, Reason :: term()}.
+create_from_binaries(InputBinaries, Options) ->
+    try
+        #{
+            prune := Prune,
+            lib := Lib,
+            start_module := StartModule,
+            application_module := ApplicationModule,
+            include_lines := IncludeLines
+        } = maps:merge(?DEFAULT_OPTIONS, Options),
+        ParsedFiles = parse_files(InputBinaries, Lib, StartModule, IncludeLines),
+        {ok,
+            build_packbeam_binary(
+                case Prune of
+                    true -> prune(ParsedFiles, ApplicationModule);
+                    _ -> ParsedFiles
+                end
+            )}
+    catch
+        _:Reason ->
+            {error, Reason}
+    end.
 
 %%-----------------------------------------------------------------------------
 %% @param   OutputPath the path to write the AVM file
@@ -364,6 +425,8 @@ parse_files(InputPaths, Lib, StartModule, IncludeLines) ->
     end.
 
 %% @private
+parse_file({Name, Data}, Lib, StartModule, IncludeLines) when is_binary(Data) ->
+    parse_file(file_type(Name), Name, Lib, StartModule, Data, IncludeLines);
 parse_file({InputPath, ModuleName}, Lib, StartModule, IncludeLines) ->
     parse_file(
         file_type(InputPath), ModuleName, Lib, StartModule, load_file(InputPath), IncludeLines
@@ -805,11 +868,15 @@ do_uncompress_literals(Chunks, Data) ->
     }.
 
 %% @private
-write_packbeam(OutputFilePath, ParsedFiles) ->
-    PackedData =
+build_packbeam_binary(ParsedFiles) ->
+    iolist_to_binary(
         [<<?AVM_HEADER>> | [pack_data(ParsedFile) || ParsedFile <- ParsedFiles]] ++
-            [create_header(0, 0, <<"end">>)],
-    file:write_file(OutputFilePath, PackedData).
+            [create_header(0, 0, <<"end">>)]
+    ).
+
+%% @private
+write_packbeam(OutputFilePath, ParsedFiles) ->
+    file:write_file(OutputFilePath, build_packbeam_binary(ParsedFiles)).
 
 %% @private
 pack_data(ParsedFile) ->
