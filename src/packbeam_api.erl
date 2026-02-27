@@ -838,8 +838,9 @@ get_uncompressed_literals(ChunkRefs) ->
         <<0:32, Data/binary>> ->
             Data;
         <<_OrigSize:32, Data/binary>> ->
-            try zlib:uncompress(Data)
-            catch _:_ -> undefined
+            case erlang:system_info(machine) of
+                "BEAM" -> zlib:uncompress(Data);
+                _ -> undefined
             end
     end.
 
@@ -852,18 +853,19 @@ maybe_uncompress_literals(Chunks) ->
             %% OTP 28+: LitT is already uncompressed (size field = 0).
             {Chunks, Data};
         <<_OrigSize:32, Data/binary>> ->
-            %% OTP =< 27: LitT is zlib-compressed. Decompress if zlib is available,
-            %% otherwise keep LitT as-is and return undefined for literals.
-            %% (When running inside AtomVM, zlib:uncompress/1 may not be available;
-            %% AtomVM's BEAM loader handles compressed LitT natively.)
-            try zlib:uncompress(Data) of
-                UncompressedData ->
+            %% OTP =< 27: LitT is zlib-compressed.
+            %% Skip decompression on AtomVM — zlib.beam contains nif_start opcodes
+            %% that crash the loader before any call is made. AtomVM's BEAM loader
+            %% handles compressed LitT natively; pruning simply gets no literal atoms.
+            case erlang:system_info(machine) of
+                "BEAM" ->
+                    UncompressedData = zlib:uncompress(Data),
                     {
                         lists:keyreplace("LitT", 1, Chunks, {"LitU", UncompressedData}),
                         UncompressedData
-                    }
-            catch
-                _:_ -> {Chunks, undefined}
+                    };
+                _ ->
+                    {Chunks, undefined}
             end
     end.
 
