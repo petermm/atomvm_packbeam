@@ -773,6 +773,30 @@ packbeam_create_from_source_text_test() ->
     ?assert(is_start(GreetFile)),
     ok.
 
+packbeam_create_from_binaries_io_format_test() ->
+    %% Regression test: compiling a module that calls io:format/2 exercises
+    %% the ImpT chunk with atoms from external modules (e.g. 'io', 'format').
+    %% This triggered an "opcodes 179" error in the AtomVM Popcorn WASM runtime
+    %% due to incorrect ImpT atom-index parsing (off-by-one on 1-based indices).
+    Src =
+        "-module(hello_world).\n"
+        "-export([start/0]).\n"
+        "start() -> io:format(\"Hello world!~n\").\n",
+    {ok, hello_world, BeamBin} = compile_source(Src),
+    Inputs = [{"hello_world.beam", BeamBin}],
+    {ok, AVMBinary} = packbeam_api:create_from_binaries(Inputs),
+    ?assert(is_binary(AVMBinary)),
+    AVMFile = dest_dir("packbeam_create_from_binaries_io_format_test.avm"),
+    ok = file:write_file(AVMFile, AVMBinary),
+    ParsedFiles = packbeam_api:list(AVMFile),
+    ?assertEqual(1, length(ParsedFiles)),
+    [HelloFile] = ParsedFiles,
+    ?assert(is_beam(HelloFile)),
+    ?assert(is_start(HelloFile)),
+    ?assertEqual(hello_world, get_module(HelloFile)),
+    ?assert(lists:member({start, 0}, get_exports(HelloFile))),
+    ok.
+
 file_exists(Path) ->
     filelib:is_file(Path).
 
