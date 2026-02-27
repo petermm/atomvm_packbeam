@@ -837,8 +837,10 @@ get_uncompressed_literals(ChunkRefs) ->
             end;
         <<0:32, Data/binary>> ->
             Data;
-        <<_Size:4/binary, Data/binary>> ->
-            zlib:uncompress(Data)
+        <<_OrigSize:32, Data/binary>> ->
+            try zlib:uncompress(Data)
+            catch _:_ -> undefined
+            end
     end.
 
 %% @private
@@ -847,23 +849,23 @@ maybe_uncompress_literals(Chunks) ->
         undefined ->
             {Chunks, undefined};
         <<0:32, Data/binary>> ->
+            %% OTP 28+: LitT is already uncompressed (size field = 0).
             {Chunks, Data};
-        <<_Size:4/binary, Data/binary>> ->
-            do_uncompress_literals(Chunks, Data)
+        <<_OrigSize:32, Data/binary>> ->
+            %% OTP =< 27: LitT is zlib-compressed. Decompress if zlib is available,
+            %% otherwise keep LitT as-is and return undefined for literals.
+            %% (When running inside AtomVM, zlib:uncompress/1 may not be available;
+            %% AtomVM's BEAM loader handles compressed LitT natively.)
+            try zlib:uncompress(Data) of
+                UncompressedData ->
+                    {
+                        lists:keyreplace("LitT", 1, Chunks, {"LitU", UncompressedData}),
+                        UncompressedData
+                    }
+            catch
+                _:_ -> {Chunks, undefined}
+            end
     end.
-
-%% @private
-do_uncompress_literals(Chunks, Data) ->
-    UncompressedData = zlib:uncompress(Data),
-    {
-        lists:keyreplace(
-            "LitT",
-            1,
-            Chunks,
-            {"LitU", UncompressedData}
-        ),
-        UncompressedData
-    }.
 
 %% @private
 build_packbeam_binary(ParsedFiles) ->
