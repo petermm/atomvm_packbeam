@@ -1079,12 +1079,16 @@ remove_names(Names, ParsedFiles) ->
 write_files(ParsedFiles, OutputDir) ->
     case filelib:is_dir(OutputDir) of
         true ->
+            erlang:system_info(machine) =:= "BEAM" andalso
+                io:format("Writing to ~s ...~n", [OutputDir]),
             lists:foreach(
                 fun(ParsedFile) ->
                     ModuleName = get_element_name(ParsedFile),
                     Path = OutputDir ++ "/" ++ ModuleName,
                     case filelib:ensure_dir(Path) of
                         ok ->
+                            erlang:system_info(machine) =:= "BEAM" andalso
+                                io:format("x ~s~n", [ModuleName]),
                             RawData = get_element_data(ParsedFile),
                             Data =
                                 case file_type(ModuleName) of
