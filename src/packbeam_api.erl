@@ -194,7 +194,9 @@ create_from_binaries(InputBinaries, Options) ->
                 end
             )}
     catch
-        _:Reason ->
+        _:Reason:Stacktrace ->
+            io:format("packbeam_api error: ~p~n", [Reason]),
+            io:format("packbeam_api stacktrace: ~p~n", [Stacktrace]),
             {error, Reason}
     end.
 
@@ -673,11 +675,11 @@ filter_modules(Modules, ParsedFiles) ->
 
 %% @private
 parse_file(beam, _ModuleName, Lib, StartModule, Data, IncludeLines) ->
-    {ok, Module, Chunks} = beam_lib:all_chunks(Data),
+    {ok, Module, Chunks} = beam_all_chunks(Data),
     {UncompressedChunks, UncompressedLiterals} = maybe_uncompress_literals(Chunks),
     FilteredChunks = filter_chunks(UncompressedChunks, IncludeLines),
-    {ok, Binary} = beam_lib:build_module(FilteredChunks),
-    {ok, {Module, ChunkRefs}} = beam_lib:chunks(Data, [imports, exports, atoms]),
+    {ok, Binary} = beam_build_module(FilteredChunks),
+    ChunkRefs = beam_named_chunks(Chunks, [imports, exports, atoms]),
     Exports = proplists:get_value(exports, ChunkRefs),
     Flags =
         if
@@ -907,8 +909,106 @@ create_padding(Size) ->
     end.
 
 %% @private
-ends_with(String, Suffix) ->
-    string:find(String, Suffix, trailing) =:= Suffix.
+ends_with(String, Suffix) when is_list(String) ->
+    ends_with(list_to_binary(String), Suffix);
+ends_with(String, Suffix) when is_list(Suffix) ->
+    ends_with(String, list_to_binary(Suffix));
+ends_with(String, Suffix) when is_binary(String), is_binary(Suffix) ->
+    SuffixSize = byte_size(Suffix),
+    case String of
+        <<_:(byte_size(String) - SuffixSize)/binary, Suffix/binary>> -> true;
+        _ -> false
+    end.
+
+%% @private
+%% Parse all chunks from a BEAM binary without beam_lib (avoids ets dependency).
+%% Returns {ok, Module, [{Tag, Data}]} where Tag is a string like "AtU8".
+beam_all_chunks(<<$F, $O, $R, $1, _Size:32, $B, $E, $A, $M, Rest/binary>>) ->
+    Chunks = beam_parse_chunks(Rest, []),
+    Module = beam_module_from_chunks(Chunks),
+    {ok, Module, Chunks}.
+
+beam_parse_chunks(<<>>, Acc) ->
+    lists:reverse(Acc);
+beam_parse_chunks(<<Tag:4/binary, Size:32, Rest/binary>>, Acc) ->
+    PaddedSize = Size + ((4 - (Size rem 4)) rem 4),
+    <<Data:Size/binary, _Pad:(PaddedSize - Size)/binary, Next/binary>> = Rest,
+    beam_parse_chunks(Next, [{binary_to_list(Tag), Data} | Acc]);
+beam_parse_chunks(_, Acc) ->
+    lists:reverse(Acc).
+
+beam_module_from_chunks(Chunks) ->
+    {_, AtU8} = lists:keyfind("AtU8", 1, Chunks),
+    <<_Count:32, _Rest/binary>> = AtU8,
+    %% First atom (index 0) after count is the module name
+    <<_:32, Len:8, Name:Len/binary, _/binary>> = AtU8,
+    binary_to_atom(Name, utf8).
+
+%% @private
+%% Rebuild a BEAM binary from a chunk list without beam_lib.
+beam_build_module(Chunks) ->
+    ChunkBins = [begin
+        Tag = list_to_binary(T),
+        Size = byte_size(D),
+        Pad = binary:copy(<<0>>, (4 - (Size rem 4)) rem 4),
+        <<Tag/binary, Size:32, D/binary, Pad/binary>>
+    end || {T, D} <- Chunks],
+    Body = iolist_to_binary(ChunkBins),
+    TotalSize = byte_size(Body) + 4,  %% +4 for "BEAM"
+    {ok, <<"FOR1", TotalSize:32, "BEAM", Body/binary>>}.
+
+%% @private
+%% Extract decoded imports/exports/atoms from raw chunks (mirrors beam_lib:chunks/2).
+beam_named_chunks(Chunks, Names) ->
+    %% Decode atom table first so exports/imports can resolve names.
+    Atoms = case lists:keyfind("AtU8", 1, Chunks) of
+        false -> [];
+        {_, AtomData} ->
+            <<_Count:32, Rest/binary>> = AtomData,
+            beam_decode_atoms(Rest, [])
+    end,
+    AtomTable = list_to_tuple(Atoms),
+    lists:filtermap(fun(Name) ->
+        RawTag = case Name of
+            atoms   -> "AtU8";
+            exports -> "ExpT";
+            imports -> "ImpT"
+        end,
+        case lists:keyfind(RawTag, 1, Chunks) of
+            false -> false;
+            {_, Data} -> {true, {Name, beam_decode_chunk(Name, Data, AtomTable)}}
+        end
+    end, Names).
+
+beam_decode_atoms(<<>>, Acc) -> lists:reverse(Acc);
+beam_decode_atoms(<<Len:8, Name:Len/binary, Rest/binary>>, Acc) ->
+    beam_decode_atoms(Rest, [binary_to_atom(Name, utf8) | Acc]).
+
+beam_decode_chunk(atoms, <<_Count:32, Rest/binary>>, _AtomTable) ->
+    Atoms = beam_decode_atoms(Rest, []),
+    lists:zip(lists:seq(0, length(Atoms) - 1), Atoms);
+beam_decode_chunk(exports, <<Count:32, Rest/binary>>, AtomTable) ->
+    beam_decode_fa_table(Count, Rest, AtomTable, []);
+beam_decode_chunk(imports, <<Count:32, Rest/binary>>, AtomTable) ->
+    beam_decode_mfa_table(Count, Rest, AtomTable, []);
+beam_decode_chunk(_, _, _) ->
+    [].
+
+%% ExpT: {_ModIdx:32, FunIdx:32, Arity:32} — resolve FunIdx against atom table
+beam_decode_fa_table(0, _, _, Acc) -> lists:reverse(Acc);
+beam_decode_fa_table(N, <<_Mod:32, Fun:32, Arity:32, Rest/binary>>, AtomTable, Acc) ->
+    FunAtom = element(Fun + 1, AtomTable),
+    beam_decode_fa_table(N - 1, Rest, AtomTable, [{FunAtom, Arity} | Acc]).
+
+%% ImpT: {ModIdx:32, FunIdx:32, Arity:32}
+%% Atom indices may reference atoms not present in AtU8 (e.g. from other modules),
+%% so guard against out-of-range with a safe lookup.
+beam_decode_mfa_table(0, _, _, Acc) -> lists:reverse(Acc);
+beam_decode_mfa_table(N, <<Mod:32, Fun:32, Arity:32, Rest/binary>>, AtomTable, Acc) ->
+    Size = tuple_size(AtomTable),
+    ModAtom = if Mod + 1 =< Size -> element(Mod + 1, AtomTable); true -> Mod end,
+    FunAtom = if Fun + 1 =< Size -> element(Fun + 1, AtomTable); true -> Fun end,
+    beam_decode_mfa_table(N - 1, Rest, AtomTable, [{ModAtom, FunAtom, Arity} | Acc]).
 
 %% @private
 filter_chunks(Chunks, IncludeLines) ->
