@@ -194,9 +194,7 @@ create_from_binaries(InputBinaries, Options) ->
                 end
             )}
     catch
-        _:Reason:Stacktrace ->
-            io:format("packbeam_api error: ~p~n", [Reason]),
-            io:format("packbeam_api stacktrace: ~p~n", [Stacktrace]),
+        _:Reason:_Stacktrace ->
             {error, Reason}
     end.
 
@@ -228,9 +226,7 @@ create_from_binaries(InputBinaries, Options) ->
 ) ->
     ok | {error, Reason :: term()}.
 create(OutputPath, InputPaths, Prune, StartModule) ->
-    io:format("WARNING: Deprecated function will be removed in the 0.9.0 release: ~p:create/4~n", [
-        ?MODULE
-    ]),
+    %% Deprecated: use create/3 with options map instead.
     Options = #{prune => Prune, start_module => StartModule},
     create(OutputPath, InputPaths, maps:merge(?DEFAULT_OPTIONS, Options)).
 
@@ -267,9 +263,7 @@ create(OutputPath, InputPaths, Prune, StartModule) ->
 ) ->
     ok | {error, Reason :: term()}.
 create(OutputPath, InputPaths, ApplicationModule, Prune, StartModule) ->
-    io:format("WARNING: Deprecated function will be removed in the 0.9.0 release: ~p:create/5~n", [
-        ?MODULE
-    ]),
+    %% Deprecated: use create/3 with options map instead.
     Options = #{
         prune => Prune, start_module => StartModule, application_module => ApplicationModule
     },
@@ -903,10 +897,8 @@ create_header(Size, Flags, ModuleName) ->
 
 %% @private
 create_padding(Size) ->
-    case Size rem 4 of
-        0 -> <<"">>;
-        K -> list_to_binary(lists:duplicate(4 - K, 0))
-    end.
+    PadBytes = (4 - (Size rem 4)) rem 4,
+    <<0:(PadBytes * 8)>>.
 
 %% @private
 %% Split a path string on "/" without using string:split/3 (not available in AtomVM).
@@ -979,7 +971,8 @@ beam_build_module(Chunks) ->
     ChunkBins = [begin
         Tag = list_to_binary(T),
         Size = byte_size(D),
-        Pad = binary:copy(<<0>>, (4 - (Size rem 4)) rem 4),
+        PadBytes = (4 - (Size rem 4)) rem 4,
+        Pad = <<0:(PadBytes * 8)>>,
         <<Tag/binary, Size:32, D/binary, Pad/binary>>
     end || {T, D} <- Chunks],
     Body = iolist_to_binary(ChunkBins),
@@ -1086,14 +1079,12 @@ remove_names(Names, ParsedFiles) ->
 write_files(ParsedFiles, OutputDir) ->
     case filelib:is_dir(OutputDir) of
         true ->
-            io:format("Writing to ~s ...~n", [OutputDir]),
             lists:foreach(
                 fun(ParsedFile) ->
                     ModuleName = get_element_name(ParsedFile),
                     Path = OutputDir ++ "/" ++ ModuleName,
                     case filelib:ensure_dir(Path) of
                         ok ->
-                            io:format("x ~s~n", [ModuleName]),
                             RawData = get_element_data(ParsedFile),
                             Data =
                                 case file_type(ModuleName) of
