@@ -939,10 +939,14 @@ beam_parse_chunks(_, Acc) ->
 
 beam_module_from_chunks(Chunks) ->
     {_, AtU8} = lists:keyfind("AtU8", 1, Chunks),
-    <<_Count:32, _Rest/binary>> = AtU8,
-    %% First atom (index 0) after count is the module name
-    <<_:32, Len:8, Name:Len/binary, _/binary>> = AtU8,
-    binary_to_atom(Name, utf8).
+    <<Count:32/signed, Rest/binary>> = AtU8,
+    %% OTP 28+ encodes atom lengths as tagged variable-length integers (negative count).
+    %% OTP =< 27 uses a plain unsigned count followed by 1-byte length prefixed atoms.
+    {Module, _} = if
+        Count < 0 -> beam_decode_long_atom(Rest);
+        true      -> beam_decode_atom(Rest)
+    end,
+    Module.
 
 %% @private
 %% Rebuild a BEAM binary from a chunk list without beam_lib.
@@ -964,8 +968,10 @@ beam_named_chunks(Chunks, Names) ->
     Atoms = case lists:keyfind("AtU8", 1, Chunks) of
         false -> [];
         {_, AtomData} ->
-            <<_Count:32, Rest/binary>> = AtomData,
-            beam_decode_atoms(Rest, [])
+            <<Count:32/signed, Rest/binary>> = AtomData,
+            if Count < 0 -> beam_decode_atoms_new(Rest, []);
+               true      -> beam_decode_atoms_old(Rest, [])
+            end
     end,
     AtomTable = list_to_tuple(Atoms),
     lists:filtermap(fun(Name) ->
@@ -980,12 +986,37 @@ beam_named_chunks(Chunks, Names) ->
         end
     end, Names).
 
-beam_decode_atoms(<<>>, Acc) -> lists:reverse(Acc);
-beam_decode_atoms(<<Len:8, Name:Len/binary, Rest/binary>>, Acc) ->
-    beam_decode_atoms(Rest, [binary_to_atom(Name, utf8) | Acc]).
+%% Old format (OTP =< 27): 1-byte length prefix per atom.
+beam_decode_atoms_old(<<>>, Acc) -> lists:reverse(Acc);
+beam_decode_atoms_old(<<Len:8, Name:Len/binary, Rest/binary>>, Acc) ->
+    beam_decode_atoms_old(Rest, [binary_to_atom(Name, utf8) | Acc]).
+%% New format (OTP 28+): tagged variable-length per atom, dispatched via
+%% beam_decode_long_atom/1 which uses the same decode_arg_val logic as beam_lib.
+beam_decode_atoms_new(<<>>, Acc) -> lists:reverse(Acc);
+beam_decode_atoms_new(Data, Acc) ->
+    {Atom, Rest} = beam_decode_long_atom(Data),
+    beam_decode_atoms_new(Rest, [Atom | Acc]).
 
-beam_decode_chunk(atoms, <<_Count:32, Rest/binary>>, _AtomTable) ->
-    Atoms = beam_decode_atoms(Rest, []),
+%% Decode a single atom using OTP 28 variable-length tagged encoding.
+%% Format: <<N:4, 0:1, _Tag:3, Name:N/binary, ...>> (small length 0-15)
+%%      or <<High:3, 0:1, 1:1, _Tag:3, Low:8, Name:Len/binary, ...>> (len 0-2047)
+beam_decode_long_atom(<<N:4, 0:1, _Tag:3, Rest0/binary>>) ->
+    <<Name:N/binary, Rest/binary>> = Rest0,
+    {binary_to_atom(Name, utf8), Rest};
+beam_decode_long_atom(<<High:3, 0:1, 1:1, _Tag:3, Low, Rest0/binary>>) ->
+    Len = (High bsl 8) bor Low,
+    <<Name:Len/binary, Rest/binary>> = Rest0,
+    {binary_to_atom(Name, utf8), Rest}.
+
+%% Decode a single atom using old (OTP =< 27) 1-byte length prefix.
+beam_decode_atom(<<Len:8, Name:Len/binary, Rest/binary>>) ->
+    {binary_to_atom(Name, utf8), Rest}.
+
+beam_decode_chunk(atoms, <<Count:32/signed, Rest/binary>>, _AtomTable) ->
+    Atoms = if
+        Count < 0 -> beam_decode_atoms_new(Rest, []);
+        true      -> beam_decode_atoms_old(Rest, [])
+    end,
     lists:zip(lists:seq(0, length(Atoms) - 1), Atoms);
 beam_decode_chunk(exports, <<Count:32, Rest/binary>>, AtomTable) ->
     beam_decode_fa_table(Count, Rest, AtomTable, []);
@@ -994,20 +1025,21 @@ beam_decode_chunk(imports, <<Count:32, Rest/binary>>, AtomTable) ->
 beam_decode_chunk(_, _, _) ->
     [].
 
-%% ExpT: {_ModIdx:32, FunIdx:32, Arity:32} — resolve FunIdx against atom table
+%% ExpT: {FunIdx:32, Arity:32, Label:32} — atom indices are 1-based (same as beam_lib).
 beam_decode_fa_table(0, _, _, Acc) -> lists:reverse(Acc);
-beam_decode_fa_table(N, <<_Mod:32, Fun:32, Arity:32, Rest/binary>>, AtomTable, Acc) ->
-    FunAtom = element(Fun + 1, AtomTable),
+beam_decode_fa_table(N, <<Fun:32, Arity:32, _Label:32, Rest/binary>>, AtomTable, Acc) ->
+    Size = tuple_size(AtomTable),
+    FunAtom = if Fun =< Size -> element(Fun, AtomTable); true -> Fun end,
     beam_decode_fa_table(N - 1, Rest, AtomTable, [{FunAtom, Arity} | Acc]).
 
-%% ImpT: {ModIdx:32, FunIdx:32, Arity:32}
-%% Atom indices may reference atoms not present in AtU8 (e.g. from other modules),
-%% so guard against out-of-range with a safe lookup.
+%% ImpT: {ModIdx:32, FunIdx:32, Arity:32} — atom indices are 1-based.
+%% Mod/Fun indices may reference atoms from other modules not present in local AtU8,
+%% so guard against out-of-range with a safe fallback to the raw index.
 beam_decode_mfa_table(0, _, _, Acc) -> lists:reverse(Acc);
 beam_decode_mfa_table(N, <<Mod:32, Fun:32, Arity:32, Rest/binary>>, AtomTable, Acc) ->
     Size = tuple_size(AtomTable),
-    ModAtom = if Mod + 1 =< Size -> element(Mod + 1, AtomTable); true -> Mod end,
-    FunAtom = if Fun + 1 =< Size -> element(Fun + 1, AtomTable); true -> Fun end,
+    ModAtom = if Mod =< Size -> element(Mod, AtomTable); true -> Mod end,
+    FunAtom = if Fun =< Size -> element(Fun, AtomTable); true -> Fun end,
     beam_decode_mfa_table(N - 1, Rest, AtomTable, [{ModAtom, FunAtom, Arity} | Acc]).
 
 %% @private
