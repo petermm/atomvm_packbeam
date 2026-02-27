@@ -291,7 +291,7 @@ list(InputPath) ->
         avm ->
             parse_file(InputPath, false, undefined, false);
         _ ->
-            throw(io_lib:format("Expected AVM file: ~p", [InputPath]))
+            throw("Expected AVM file: " ++ InputPath)
     end.
 
 %%-----------------------------------------------------------------------------
@@ -320,7 +320,7 @@ extract(InputPath, AVMElementNames, OutputDir) ->
             ParsedFiles = parse_file(InputPath, false, undefined, false),
             write_files(filter_names(AVMElementNames, ParsedFiles), OutputDir);
         _ ->
-            throw(io_lib:format("Expected AVM file: ~p", [InputPath]))
+            throw("Expected AVM file: " ++ InputPath)
     end.
 
 %%-----------------------------------------------------------------------------
@@ -347,7 +347,7 @@ delete(OutputPath, InputPath, AVMElementNames) ->
             ParsedFiles = parse_file(InputPath, false, undefined, false),
             write_packbeam(OutputPath, remove_names(AVMElementNames, ParsedFiles));
         _ ->
-            throw(io_lib:format("Expected AVM file: ~p", [InputPath]))
+            throw("Expected AVM file: " ++ InputPath)
     end.
 
 %%-----------------------------------------------------------------------------
@@ -455,8 +455,8 @@ load_file(Path) ->
     case file:read_file(Path) of
         {ok, Data} ->
             Data;
-        {error, Reason} ->
-            throw(io_lib:format("Unable to load file ~s.  Reason: ~p", [Path, Reason]))
+        {error, _Reason} ->
+            throw("Unable to load file: " ++ Path)
     end.
 
 %% @private
@@ -546,7 +546,7 @@ is_application_file(ParsedFile) ->
     case not is_beam(ParsedFile) of
         true ->
             ModuleName = get_element_name(ParsedFile),
-            Components = string:split(ModuleName, "/", all),
+            Components = split_path(ModuleName),
             case Components of
                 [_ModuleName, "priv", "application.bin"] ->
                     true;
@@ -698,7 +698,7 @@ parse_file(beam, _ModuleName, Lib, StartModule, Data, IncludeLines) ->
     [
         [
             {module, Module},
-            {element_name, io_lib:format("~s.beam", [atom_to_list(Module)])},
+            {element_name, atom_to_list(Module) ++ ".beam"},
             {flags, Flags},
             {data, Binary},
             {chunk_refs, ChunkRefs},
@@ -710,7 +710,7 @@ parse_file(avm, ModuleName, Lib, StartModule, Data, _IncludeLines) ->
         <<?AVM_HEADER, AVMData/binary>> ->
             parse_avm_data(Lib, StartModule, AVMData);
         _ ->
-            throw(io_lib:format("Invalid AVM header: ~p", [ModuleName]))
+            throw("Invalid AVM header: " ++ ModuleName)
     end;
 parse_file(normal, ModuleName, _Lib, _StartModule, Data, _IncludeLines) ->
     DataSize = byte_size(Data),
@@ -779,11 +779,7 @@ parse_avm_data(Lib, StartModule, <<Size:32/integer, AVMRest/binary>>, Accum) ->
             Beam1 = lists:keystore(flags, 1, Beam0, {flags, BeamFlags1}),
             parse_avm_data(Lib, StartModule, AVMNext, [Beam1 | Accum]);
         _ ->
-            throw(
-                io_lib:format("Invalid AVM data size: ~p (AVMRest=~p)", [
-                    Size, erlang:byte_size(AVMRest)
-                ])
-            )
+            throw("Invalid AVM data size")
     end.
 
 %% @private
@@ -909,6 +905,17 @@ create_padding(Size) ->
     end.
 
 %% @private
+%% Split a path string on "/" without using string:split/3 (not available in AtomVM).
+split_path(Path) ->
+    split_path(Path, [], []).
+split_path([], Comp, Acc) ->
+    lists:reverse([lists:reverse(Comp) | Acc]);
+split_path([$/ | Rest], Comp, Acc) ->
+    split_path(Rest, [], [lists:reverse(Comp) | Acc]);
+split_path([C | Rest], Comp, Acc) ->
+    split_path(Rest, [C | Comp], Acc).
+
+%% @private
 ends_with(String, Suffix) when is_list(String) ->
     ends_with(list_to_binary(String), Suffix);
 ends_with(String, Suffix) when is_list(Suffix) ->
@@ -924,9 +931,28 @@ ends_with(String, Suffix) when is_binary(String), is_binary(Suffix) ->
 %% Parse all chunks from a BEAM binary without beam_lib (avoids ets dependency).
 %% Returns {ok, Module, [{Tag, Data}]} where Tag is a string like "AtU8".
 beam_all_chunks(<<$F, $O, $R, $1, _Size:32, $B, $E, $A, $M, Rest/binary>>) ->
-    Chunks = beam_parse_chunks(Rest, []),
+    Chunks0 = beam_parse_chunks(Rest, []),
+    %% Normalise OTP 28+ AtU8 to the old format so AtomVM's BEAM loader can read it.
+    Chunks = beam_normalize_atu8(Chunks0),
     Module = beam_module_from_chunks(Chunks),
     {ok, Module, Chunks}.
+
+%% @private
+%% If the AtU8 chunk uses the OTP 28 variable-length encoding (negative count),
+%% rewrite it as the classic format: <<Count:32, Len:8, Name/binary, ...>>.
+%% AtomVM's BEAM loader only understands the classic format.
+beam_normalize_atu8(Chunks) ->
+    case lists:keyfind("AtU8", 1, Chunks) of
+        false -> Chunks;
+        {_, <<Count:32/signed, _/binary>>} when Count >= 0 -> Chunks;
+        {_, <<_NegCount:32/signed, Data/binary>>} ->
+            Atoms = beam_decode_atoms_new(Data, []),
+            NewAtU8 = iolist_to_binary(
+                [<<(length(Atoms)):32>> |
+                 [<<(byte_size(A))/integer, A/binary>> || A <- [atom_to_binary(X, utf8) || X <- Atoms]]]
+            ),
+            lists:keyreplace("AtU8", 1, Chunks, {"AtU8", NewAtU8})
+    end.
 
 beam_parse_chunks(<<>>, Acc) ->
     lists:reverse(Acc);
@@ -938,15 +964,10 @@ beam_parse_chunks(_, Acc) ->
     lists:reverse(Acc).
 
 beam_module_from_chunks(Chunks) ->
-    {_, AtU8} = lists:keyfind("AtU8", 1, Chunks),
-    <<Count:32/signed, Rest/binary>> = AtU8,
-    %% OTP 28+ encodes atom lengths as tagged variable-length integers (negative count).
-    %% OTP =< 27 uses a plain unsigned count followed by 1-byte length prefixed atoms.
-    {Module, _} = if
-        Count < 0 -> beam_decode_long_atom(Rest);
-        true      -> beam_decode_atom(Rest)
-    end,
-    Module.
+    %% By the time this is called, AtU8 has been normalised to the classic format
+    %% by beam_normalize_atu8/1, so the first atom is always <<Count:32, Len:8, Name/binary>>.
+    {_, <<_Count:32, Len:8, Name:Len/binary, _/binary>>} = lists:keyfind("AtU8", 1, Chunks),
+    binary_to_atom(Name, utf8).
 
 %% @private
 %% Rebuild a BEAM binary from a chunk list without beam_lib.
@@ -965,13 +986,10 @@ beam_build_module(Chunks) ->
 %% Extract decoded imports/exports/atoms from raw chunks (mirrors beam_lib:chunks/2).
 beam_named_chunks(Chunks, Names) ->
     %% Decode atom table first so exports/imports can resolve names.
+    %% AtU8 is always in classic format here (normalised by beam_all_chunks/1).
     Atoms = case lists:keyfind("AtU8", 1, Chunks) of
         false -> [];
-        {_, AtomData} ->
-            <<Count:32/signed, Rest/binary>> = AtomData,
-            if Count < 0 -> beam_decode_atoms_new(Rest, []);
-               true      -> beam_decode_atoms_old(Rest, [])
-            end
+        {_, <<_Count:32, Rest/binary>>} -> beam_decode_atoms_old(Rest, [])
     end,
     AtomTable = list_to_tuple(Atoms),
     lists:filtermap(fun(Name) ->
@@ -1008,15 +1026,10 @@ beam_decode_long_atom(<<High:3, 0:1, 1:1, _Tag:3, Low, Rest0/binary>>) ->
     <<Name:Len/binary, Rest/binary>> = Rest0,
     {binary_to_atom(Name, utf8), Rest}.
 
-%% Decode a single atom using old (OTP =< 27) 1-byte length prefix.
-beam_decode_atom(<<Len:8, Name:Len/binary, Rest/binary>>) ->
-    {binary_to_atom(Name, utf8), Rest}.
 
-beam_decode_chunk(atoms, <<Count:32/signed, Rest/binary>>, _AtomTable) ->
-    Atoms = if
-        Count < 0 -> beam_decode_atoms_new(Rest, []);
-        true      -> beam_decode_atoms_old(Rest, [])
-    end,
+beam_decode_chunk(atoms, <<_Count:32, Rest/binary>>, _AtomTable) ->
+    %% AtU8 is always in classic format here (normalised by beam_all_chunks/1).
+    Atoms = beam_decode_atoms_old(Rest, []),
     lists:zip(lists:seq(0, length(Atoms) - 1), Atoms);
 beam_decode_chunk(exports, <<Count:32, Rest/binary>>, AtomTable) ->
     beam_decode_fa_table(Count, Rest, AtomTable, []);
