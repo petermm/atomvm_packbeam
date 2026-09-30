@@ -133,6 +133,8 @@ print_help() ->
         "              [--lib|-l]             Create a library avm, with no start module~n"
         "              [--start|-s <module>]  Start module~n"
         "              [--remove_lines|-r]    Remove line number information from AVM files~n"
+        "              [--avm-labels]         Generate avmL label tables (little-endian, 32-bit)~n"
+        "              [--avm-label-width 32|auto]  Label width (requires --avm-labels)~n"
         "~n"
         "    list <options> <avm-file>~n"
         "        where:~n"
@@ -183,6 +185,14 @@ get_version() ->
 do_create(Opts, Args) ->
     validate_args(create, Opts, Args),
     [OutputFile | InputFiles] = Args,
+    Labels =
+        case {maps:get(avm_labels, Opts, false), maps:find(avm_label_width, Opts)} of
+            {false, error} -> false;
+            {true, error} -> #{};
+            {true, {ok, "32"}} -> #{label_width => 32};
+            {true, {ok, "auto"}} -> #{label_width => auto};
+            _ -> throw("Use --avm-labels [--avm-label-width 32|auto]")
+        end,
     ok = packbeam_api:create(
         OutputFile,
         InputFiles,
@@ -190,7 +200,8 @@ do_create(Opts, Args) ->
             lib => maps:get(lib, Opts, false),
             prune => maps:get(prune, Opts, false),
             start_module => maps:get(start_module, Opts, undefined),
-            include_lines => not maps:get(remove_lines, Opts, false)
+            include_lines => not maps:get(remove_lines, Opts, false),
+            avm_labels => Labels
         }
     ),
     0.
@@ -346,6 +357,10 @@ parse_args(["-r" | T], {Opts, Args}) ->
     parse_args(["--remove_lines" | T], {Opts, Args});
 parse_args(["--remove_lines" | T], {Opts, Args}) ->
     parse_args(T, {Opts#{remove_lines => true}, Args});
+parse_args(["--avm-labels" | T], {Opts, Args}) ->
+    parse_args(T, {Opts#{avm_labels => true}, Args});
+parse_args(["--avm-label-width", Width | T], {Opts, Args}) ->
+    parse_args(T, {Opts#{avm_label_width => Width}, Args});
 parse_args(["-format", Format | T], {Opts, Args}) ->
     io:format("WARNING.  Deprecated option.  Use --format instead.~n"),
     parse_args(["--format", Format | T], {Opts, Args});

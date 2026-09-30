@@ -41,7 +41,19 @@
 ).
 
 -define(ALLOWED_CHUNKS, [
-    "AtU8", "Code", "ExpT", "LocT", "ImpT", "LitU", "FunT", "StrT", "LitT", "avmN", "Type", "Recs"
+    "AtU8",
+    "Code",
+    "ExpT",
+    "LocT",
+    "ImpT",
+    "LitU",
+    "FunT",
+    "StrT",
+    "LitT",
+    "avmN",
+    "Type",
+    "Recs",
+    "avmL"
 ]).
 -define(BEAM_START_FLAG, 1).
 -define(BEAM_CODE_FLAG, 2).
@@ -55,7 +67,8 @@
     lib => boolean(),
     start_module => module() | undefined,
     application_module => module() | undefined,
-    include_lines => boolean()
+    include_lines => boolean(),
+    avm_labels => false | #{label_width => 32 | auto}
 }.
 
 -export_type([
@@ -70,7 +83,8 @@
     lib => false,
     start_module => undefined,
     application_module => undefined,
-    include_lines => true
+    include_lines => true,
+    avm_labels => false
 }).
 
 %%
@@ -113,6 +127,10 @@ create(OutputPath, InputPaths) ->
 %%
 %%          This function will create an AVM file at the location specified in
 %%          OutputPath, using the input files specified in InputPaths.
+%%          Set `avm_labels => #{}' to generate little-endian, 32-bit avmL label
+%%          tables, or `avm_labels => #{label_width => auto}' for compact tables where
+%%          possible. Generation is disabled by default. Existing tables are
+%%          replaced when generation is enabled; Code and Line bytes are unchanged.
 %% @end
 %%-----------------------------------------------------------------------------
 -spec create(
@@ -126,16 +144,17 @@ create(OutputPath, InputPaths, Options) ->
         lib := Lib,
         start_module := StartModule,
         application_module := ApplicationModule,
-        include_lines := IncludeLines
+        include_lines := IncludeLines,
+        avm_labels := Labels
     } = maps:merge(?DEFAULT_OPTIONS, Options),
+    LabelWidth = label_width(Labels),
     ParsedFiles = parse_files(InputPaths, Lib, StartModule, IncludeLines),
-    write_packbeam(
-        OutputPath,
+    RetainedFiles =
         case Prune of
             true -> prune(ParsedFiles, ApplicationModule);
             _ -> ParsedFiles
-        end
-    ).
+        end,
+    write_packbeam(OutputPath, add_labels(RetainedFiles, LabelWidth)).
 
 %%-----------------------------------------------------------------------------
 %% @param   OutputPath the path to write the AVM file
@@ -342,6 +361,34 @@ is_beam(AVMElement) ->
 %%
 %% Internal API functions
 %%
+
+label_width(false) ->
+    false;
+label_width(Options) when is_map(Options) ->
+    case {maps:keys(Options) -- [label_width], maps:get(label_width, Options, 32)} of
+        {[], Width} when Width =:= 32; Width =:= auto -> Width;
+        _ -> throw({invalid_avm_labels_options, Options})
+    end;
+label_width(Options) ->
+    throw({invalid_avm_labels_options, Options}).
+
+add_labels(Files, false) ->
+    Files;
+add_labels(Files, Width) ->
+    lists:map(
+        fun(File) ->
+            case is_beam(File) of
+                false ->
+                    File;
+                true ->
+                    case packbeam_labt:add(get_element_data(File), Width) of
+                        {ok, Data} -> lists:keystore(data, 1, File, {data, Data});
+                        {error, Reason} -> throw({avm_labels, get_element_name(File), Reason})
+                    end
+            end
+        end,
+        Files
+    ).
 
 %% @private
 get_flags(AVMElement) ->

@@ -85,6 +85,8 @@ On-line help is available via the `help` sub-command:
                 [--lib|-l]             Create a library avm, with no start module
                 [--start|-s <module>]  Start module
                 [--remove_lines|-r]    Remove line number information from AVM files
+                [--avm-labels]         Generate avmL label tables (little-endian, 32-bit)
+                [--avm-label-width 32|auto]  Label width (requires --avm-labels)
 
         list <options> <avm-file>
             where:
@@ -133,6 +135,52 @@ The input files specified in the create sub-command may be among the following t
 * "Normal" files, e.g., text files, binary files, etc.
 
 Note that beam files specified are stripped of their path information, inside of the generated AVM file.  Any files that have the same name will be added in the order they are listed on the command line.  However, AtomVM will only resolve the first such file when loading modules at run-time.
+
+#### Precomputed label tables (avmL)
+
+`avmL` (AtomVM label table) generation is optional and implemented entirely in Erlang.
+The chunk name follows AtomVM's `avmN` native-code naming pattern. Enable it when packing
+applications for AtomVM firmware that supports and enables `avmL`:
+
+```sh
+packbeam create --avm-labels app.avm app.beam libraries.avm
+```
+
+This generates tables for every retained bytecode module, including modules imported from
+existing AVM files, after pruning. It replaces any supplied `avmL` chunks, preserves the
+original Code bytes, and does not change the line-information policy. Without `--avm-labels`,
+packing behaves as before and preserves existing `avmL` chunks without generating new ones.
+Native-only precompiled modules (`avmN` without `Code`) are retained without generating a table.
+The experimental `LabT` chunk name is not supported; regenerate those archives from bytecode.
+
+Tables use **little-endian, 32-bit label offsets by default**, independently of the
+build host. This matches ESP32, RP2, and STM32 targets, and is compatible with both
+compact-label and non-compact-label AtomVM builds. The optional
+`--avm-label-width auto` selects 16-bit offsets when the Code chunk payload fits in
+65535 bytes, otherwise 32-bit. Firmware with compact labels disabled cannot use a
+16-bit table and falls back to allocating labels in RAM. Big-endian targets also fall
+back rather than using these little-endian tables.
+
+The Erlang API exposes the same settings through `packbeam_api:create/3`:
+
+```erlang
+packbeam_api:create("app.avm", ["app.beam", "libraries.avm"], #{avm_labels => #{}}).
+packbeam_api:create("app.avm", ["app.beam"], #{avm_labels => #{label_width => auto}}).
+```
+
+`avm_labels => false` is the default; `#{label_width => 32}` explicitly selects the default
+width. These are PackBEAM API options, not automatically recognized Rebar or Mix project
+settings; build plugins must forward them.
+
+On `avmL`-enabled firmware, tables in flash-backed modules avoid label-table RAM
+allocations and bytecode scanning during loading. Modules loaded into RAM still keep
+their tables in RAM. Firmware with `avmL` disabled uses its ordinary fallback scanner.
+
+The generator supports BEAM instruction-set format 0 and opcodes through OTP 29
+(opcode 191). This does not add runtime support for those opcodes to AtomVM. The current
+`avmL` format supports at most 65535 label slots, regardless of offset width. Unsupported
+bytecode or malformed encodings cause a module-qualified error before the output archive
+is written; requested generation is never silently skipped.
 
 #### Start Entrypoint
 
