@@ -523,6 +523,38 @@ packbeam_extract_test() ->
 
     ok.
 
+packbeam_labt_test() ->
+    Output = dest_dir("packbeam_labt.avm"),
+    Prefix = filename:absname(?PACKBEAM) ++ " create ",
+    Suffix = " " ++ Output ++ " " ++ test_beam_path("a.beam"),
+    lists:foreach(
+        fun({Args, Flag}) ->
+            ?assertEqual("0", string:trim(os:cmd(Prefix ++ Args ++ Suffix ++ "; echo $?"))),
+            [File] = packbeam_api:list(Output),
+            {ok, _, Chunks} = beam_lib:all_chunks(packbeam_api:get_element_data(File)),
+            <<_:32/little, ActualFlag:16/little, _:16/little, _/binary>> = proplists:get_value(
+                "avmL", Chunks
+            ),
+            ?assertEqual(Flag, ActualFlag)
+        end,
+        [
+            {"--avm-labels", 1},
+            {"--avm-labels --avm-label-width 32", 1},
+            {"--avm-label-width auto --avm-labels", 0}
+        ]
+    ),
+    ok = file:write_file(Output, <<"keep">>),
+    lists:foreach(
+        fun(Args) ->
+            Error = os:cmd(Prefix ++ Args ++ Suffix ++ "; echo $?"),
+            ?assertEqual(ok, expect_contains("Use --avm-labels", Error)),
+            ?assertEqual("255", lists:last(string:lexemes(Error, "\r\n"))),
+            ?assertEqual({ok, <<"keep">>}, file:read_file(Output))
+        end,
+        ["--avm-label-width auto", "--avm-labels --avm-label-width 16"]
+    ),
+    file:delete(Output).
+
 %%
 %% helper functions
 %%

@@ -645,6 +645,99 @@ packbeam_create_prune_supervisor_callback_from_avm_test() ->
 
     ok.
 
+packbeam_create_labt_test() ->
+    Input = dest_dir("labt_input.avm"),
+    Output = dest_dir("labt_output.avm"),
+    Sources = [test_beam_path("a.beam"), test_beam_path("d.beam"), "test/priv/test.txt"],
+    ok = packbeam_api:create(Input, Sources),
+    Original = packbeam_api:list(Input),
+    ok = packbeam_api:create(Output, [Input], #{avm_labels => #{}}),
+    Packed = packbeam_api:list(Output),
+    lists:foreach(
+        fun({Before, After}) ->
+            ?assertEqual(get_module_name(Before), get_module_name(After)),
+            ?assertEqual(is_start(Before), is_start(After)),
+            Data = packbeam_api:get_element_data(After),
+            case is_beam(Before) of
+                false ->
+                    ?assertEqual(packbeam_api:get_element_data(Before), Data);
+                true ->
+                    {ok, _, OldChunks} = beam_lib:all_chunks(packbeam_api:get_element_data(Before)),
+                    {ok, _, Chunks} = beam_lib:all_chunks(Data),
+                    ?assertEqual(undefined, proplists:get_value("avmL", OldChunks)),
+                    <<_:32/little, 1:16/little, _:16/little, _/binary>> = proplists:get_value(
+                        "avmL", Chunks
+                    ),
+                    ?assertEqual(OldChunks, lists:keydelete("avmL", 1, Chunks))
+            end
+        end,
+        lists:zip(Original, Packed)
+    ),
+    %% Direct BEAM input, pruning, and replacement of a preexisting narrow table.
+    ok = packbeam_api:create(Input, Sources, #{avm_labels => #{label_width => auto}}),
+    ok = packbeam_api:create(Output, [Input], #{prune => true, avm_labels => #{}}),
+    Pruned = packbeam_api:list(Output),
+    ?assertNot(parsed_file_contains_module(d, Pruned)),
+    [A] = [F || F <- Pruned, is_beam(F)],
+    {ok, _, AChunks} = beam_lib:all_chunks(packbeam_api:get_element_data(A)),
+    <<_:32/little, 1:16/little, _:16/little, _/binary>> = proplists:get_value("avmL", AChunks),
+    %% With generation off, retain supplied tables unchanged.
+    ok = packbeam_api:create(Output, [Input]),
+    ?assertEqual(packbeam_api:list(Input), packbeam_api:list(Output)),
+    file:delete(Input),
+    file:delete(Output).
+
+packbeam_labt_native_only_test() ->
+    NativePath = dest_dir("native.beam"),
+    Input = dest_dir("native_input.avm"),
+    Output = dest_dir("native_output.avm"),
+    {ok, _, Chunks} = beam_lib:all_chunks(test_beam_path("a.beam")),
+    NativeChunks = lists:keydelete("Code", 1, Chunks) ++ [{"avmN", <<1, 2, 3, 4>>}],
+    {ok, Native} = beam_lib:build_module(NativeChunks),
+    ok = file:write_file(NativePath, Native),
+    Sources = [NativePath, test_beam_path("d.beam")],
+    ok = packbeam_api:create(Input, Sources),
+    [Before, _] = packbeam_api:list(Input),
+    lists:foreach(
+        fun({Files, Width}) ->
+            ok = packbeam_api:create(Output, Files, #{avm_labels => #{label_width => Width}}),
+            [After, Bytecode] = packbeam_api:list(Output),
+            ?assertEqual(Before, After),
+            {ok, _, PackedChunks} = beam_lib:all_chunks(packbeam_api:get_element_data(Bytecode)),
+            ?assert(lists:keymember("avmL", 1, PackedChunks))
+        end,
+        [{Sources, 32}, {Sources, auto}, {[Input], 32}, {[Input], auto}]
+    ),
+    file:delete(NativePath),
+    file:delete(Input),
+    file:delete(Output).
+
+packbeam_labt_errors_preserve_output_test() ->
+    Output = dest_dir("labt_errors.avm"),
+    BadBeam = dest_dir("labt_bad.beam"),
+    ok = file:write_file(Output, <<"keep this file">>),
+    lists:foreach(
+        fun(Options) ->
+            ?assertThrow(
+                {invalid_avm_labels_options, Options},
+                packbeam_api:create(Output, [test_beam_path("a.beam")], #{avm_labels => Options})
+            )
+        end,
+        [true, #{label_width => 16}, #{endian => big}]
+    ),
+    {ok, Bytes} = file:read_file(test_beam_path("a.beam")),
+    {ok, _, Chunks} = beam_lib:all_chunks(Bytes),
+    Code = <<16:32, 0:32, 192:32, 2:32, 1:32, 1, 16, 3>>,
+    {ok, Bad} = beam_lib:build_module(lists:keystore("Code", 1, Chunks, {"Code", Code})),
+    ok = file:write_file(BadBeam, Bad),
+    ?assertThrow(
+        {avm_labels, _, {unsupported_opcode, 192}},
+        packbeam_api:create(Output, [BadBeam], #{avm_labels => #{}})
+    ),
+    ?assertEqual({ok, <<"keep this file">>}, file:read_file(Output)),
+    file:delete(Output),
+    file:delete(BadBeam).
+
 file_exists(Path) ->
     filelib:is_file(Path).
 

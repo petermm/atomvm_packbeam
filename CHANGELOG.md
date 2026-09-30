@@ -9,6 +9,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+- Add opt-in pure-Erlang `avmL` generation through `--avm-labels` and the `create/3` API.
+  Tables default to little-endian, 32-bit offsets; `--avm-label-width auto` enables
+  compact offsets where possible. Generation also covers modules imported from AVM files.
+- Preserve native-only precompiled modules when generating `avmL` tables, allowing
+  mixed bytecode/native archives to be packed with `--avm-labels`.
+
 ## [0.8.2] (2026.02.24)
 - Fixed a bug where prune removed modules that were only present as callbacks
 

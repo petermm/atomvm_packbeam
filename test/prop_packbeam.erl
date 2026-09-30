@@ -68,6 +68,96 @@ prop_simple_test() ->
         end
     ).
 
+prop_labt_offsets() ->
+    ?FORALL(
+        {Instructions, CutFraction},
+        {?LET(N, choose(1, 40), vector(N, labt_instruction())), choose(0, 1000)},
+        begin
+            %% Expected positions come from the generator's encoding lengths,
+            %% never from reading back the generated instruction stream.
+            {Parts, Offsets, End} = lists:foldl(
+                fun({Instruction, Length}, {Acc, Positions, Pos}) ->
+                    Id = length(Positions) + 1,
+                    {Label, LabelLength} =
+                        case Id < 16 of
+                            true -> {<<1, (Id bsl 4)>>, 2};
+                            false -> {<<1, 8, Id>>, 3}
+                        end,
+                    {
+                        [[Label, Instruction] | Acc],
+                        [Pos + LabelLength | Positions],
+                        Pos + LabelLength + Length
+                    }
+                end,
+                {[], [], 0},
+                Instructions
+            ),
+            Code = iolist_to_binary([lists:reverse(Parts), 3]),
+            Count = length(Offsets) + 1,
+            Payload = <<16:32, 0:32, 191:32, Count:32, 1:32, Code/binary>>,
+            MakeBeam = fun(C) ->
+                beam_lib:build_module([
+                    {"AtU8", <<1:32, 4, "labt">>}, {"Code", C}
+                ])
+            end,
+            {ok, Beam} = MakeBeam(Payload),
+            Cut = CutFraction * (byte_size(Code) - 1) div 1000,
+            Prefix = binary:part(Code, 0, Cut),
+            {ok, Truncated} = MakeBeam(<<16:32, 0:32, 191:32, Count:32, 1:32, Prefix/binary>>),
+            {error, _} = packbeam_labt:add(Truncated, 32),
+            lists:all(
+                fun({Width, Bits, Flag}) ->
+                    {ok, Packed} = packbeam_labt:add(Beam, Width),
+                    {ok, _, Chunks} = beam_lib:all_chunks(Packed),
+                    Entries = <<<<Offset:Bits/little>> || Offset <- [0 | lists:reverse(Offsets)]>>,
+                    proplists:get_value("Code", Chunks) =:= Payload andalso
+                        proplists:get_value("avmL", Chunks) =:=
+                            <<End:32/little, Flag:16/little, Count:16/little, Entries/binary>>
+                end,
+                [{32, 32, 1}, {auto, 16, 0}]
+            )
+        end
+    ).
+
+labt_instruction() ->
+    oneof([
+        ?LET({Source, Length}, labt_source(), {<<64, Source/binary, 3>>, Length + 2}),
+        ?LET(
+            Sources,
+            resize(30, list(labt_source())),
+            begin
+                N = length(Sources),
+                Values = iolist_to_binary([Bin || {Bin, _} <- Sources]),
+                Length = lists:sum([Size || {_, Size} <- Sources]),
+                EncodedN =
+                    case N < 16 of
+                        true -> <<(N bsl 4)>>;
+                        false -> <<8, N>>
+                    end,
+                CountLength =
+                    case N < 16 of
+                        true -> 1;
+                        false -> 2
+                    end,
+                {<<164, 3, 23, EncodedN/binary, Values/binary>>, 3 + CountLength + Length}
+            end
+        ),
+        {<<16, 55, 32, 0, 16, 16, 32, 0>>, 8}
+    ]).
+
+labt_source() ->
+    oneof([
+        ?LET(Value, choose(0, 15), {<<((Value bsl 4) bor 1)>>, 1}),
+        ?LET(
+            Value,
+            choose(16, 2047),
+            {<<(((Value bsr 8) bsl 5) bor 9), (Value band 255)>>, 2}
+        ),
+        ?LET(Bytes, binary(9), {<<249, 0, Bytes/binary>>, 11}),
+        ?LET(Register, choose(0, 15), {<<87, ((Register bsl 4) bor 3), 0>>, 3}),
+        ?LET(Index, choose(0, 15), {<<71, (Index bsl 4)>>, 2})
+    ]).
+
 modules_and_parsed_files_are_equivalent(Modules, ParsedFiles) ->
     lists:sort(Modules) =:=
         lists:sort([get_module(ParsedFile) || ParsedFile <- get_beam_files(ParsedFiles)]).
