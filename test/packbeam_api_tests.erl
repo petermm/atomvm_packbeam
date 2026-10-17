@@ -712,6 +712,50 @@ packbeam_labt_native_only_test() ->
     file:delete(Input),
     file:delete(Output).
 
+packbeam_remove_lines_from_avm_test() ->
+    Input = dest_dir("line_input.avm"),
+    Output = dest_dir("line_output.avm"),
+    Sources = [test_beam_path("a.beam"), test_beam_path("c.beam"), "test/priv/test.txt"],
+    ok = packbeam_api:create(Input, Sources, #{avm_labels => #{}}),
+    Original = packbeam_api:list(Input),
+    %% Default repacking must preserve source locations as well as avmL.
+    ok = packbeam_api:create(Output, [Input]),
+    ?assertEqual(Original, packbeam_api:list(Output)),
+    %% Listing, extraction, and deletion must not request stripping implicitly.
+    ExtractDir = create_scratch_dir("line_extract"),
+    ok = packbeam_api:extract(Input, ["a.beam"], ExtractDir),
+    [A | _] = Original,
+    ?assertEqual({ok, packbeam_api:get_element_data(A)}, file:read_file(ExtractDir ++ "/a.beam")),
+    file:delete(ExtractDir ++ "/a.beam"),
+    file:del_dir(ExtractDir),
+    ok = packbeam_api:delete(Output, Input, ["c.beam"]),
+    ?assertEqual([F || F <- Original, get_module_name(F) =/= "c.beam"], packbeam_api:list(Output)),
+    ok = packbeam_api:create(Output, [Input], #{include_lines => false}),
+    Stripped = packbeam_api:list(Output),
+    ?assertEqual(length(Original), length(Stripped)),
+    lists:foreach(
+        fun({Before, After}) ->
+            ?assertEqual(get_module_name(Before), get_module_name(After)),
+            ?assertEqual(is_start(Before), is_start(After)),
+            case is_beam(Before) of
+                false ->
+                    ?assertEqual(Before, After);
+                true ->
+                    {ok, _, OldChunks} = beam_lib:all_chunks(packbeam_api:get_element_data(Before)),
+                    {ok, _, NewChunks} = beam_lib:all_chunks(packbeam_api:get_element_data(After)),
+                    ?assert(lists:keymember("Line", 1, OldChunks)),
+                    ?assert(lists:keymember("avmL", 1, OldChunks)),
+                    ?assertEqual(lists:keydelete("Line", 1, OldChunks), NewChunks)
+            end
+        end,
+        lists:zip(Original, Stripped)
+    ),
+    %% A subsequent import cannot restore stripped locations.
+    ok = packbeam_api:create(Input, [Output]),
+    ?assertEqual(Stripped, packbeam_api:list(Input)),
+    file:delete(Input),
+    file:delete(Output).
+
 packbeam_labt_errors_preserve_output_test() ->
     Output = dest_dir("labt_errors.avm"),
     BadBeam = dest_dir("labt_bad.beam"),
