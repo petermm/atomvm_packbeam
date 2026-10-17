@@ -222,9 +222,14 @@ If there is no beam file with a `start/0` entry-point defined in the list of inp
 
 #### Line number information
 
-By default, the `packbeam` tool will generate line number information for embedded BEAM files.  Line number information is included in Erlang stacktraces, giving developers more clues into bugs in their programs.  However, line number information does increase the size of AVM files, and in some cases can have an impact on memory in running applications.
+By default, the `packbeam` tool preserves existing line number information in embedded BEAM files. Line number information is included in Erlang stacktraces, giving developers more clues into bugs in their programs. However, line number information does increase the size of AVM files, and in some cases can have an impact on memory in running applications.
 
 For production applications that have no need for line number information, we recommend using the `-r` (or `--remove_lines`) flags, which will strip line number information from embedded BEAM files.
+
+Stripping applies to both direct BEAM inputs and modules imported from AVM archives.
+The API equivalent is `#{include_lines => false}`. Only the `Line` chunk is removed;
+Code and `avmL` chunks are preserved. Repacking without stripping cannot restore line
+information already removed from an input.
 
 ### `list` sub-command
 

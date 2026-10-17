@@ -543,6 +543,22 @@ packbeam_labt_test() ->
             {"--avm-label-width auto --avm-labels", 0}
         ]
     ),
+    Stripped = dest_dir("packbeam_labt_no_lines.avm"),
+    ?assertEqual(
+        "0",
+        string:trim(
+            os:cmd(
+                Prefix ++ "--remove_lines " ++ Stripped ++ " " ++ Output ++ "; echo $?"
+            )
+        )
+    ),
+    [Before] = packbeam_api:list(Output),
+    [After] = packbeam_api:list(Stripped),
+    {ok, _, OldChunks} = beam_lib:all_chunks(packbeam_api:get_element_data(Before)),
+    {ok, _, NewChunks} = beam_lib:all_chunks(packbeam_api:get_element_data(After)),
+    ?assert(lists:keymember("Line", 1, OldChunks)),
+    ?assertEqual(lists:keydelete("Line", 1, OldChunks), NewChunks),
+    file:delete(Stripped),
     ok = file:write_file(Output, <<"keep">>),
     lists:foreach(
         fun(Args) ->

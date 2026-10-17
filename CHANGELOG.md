@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add opt-in pure-Erlang `avmL` generation through `--avm-labels` and the `create/3` API.
   Tables default to little-endian, 32-bit offsets; `--avm-label-width auto` enables
   compact offsets where possible. Generation also covers modules imported from AVM files.
+- Fix `--remove_lines` and `include_lines => false` to strip line information from
+  modules imported from AVM archives as well as direct BEAM inputs.
 - Preserve native-only precompiled modules when generating `avmL` tables, allowing
   mixed bytecode/native archives to be packed with `--avm-labels`.
 

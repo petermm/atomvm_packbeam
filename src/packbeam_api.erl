@@ -245,7 +245,7 @@ create(OutputPath, InputPaths, ApplicationModule, Prune, StartModule) ->
 list(InputPath) ->
     case file_type(InputPath) of
         avm ->
-            parse_file(InputPath, false, undefined, false);
+            parse_file(InputPath, false, undefined, true);
         _ ->
             throw(io_lib:format("Expected AVM file: ~p", [InputPath]))
     end.
@@ -273,7 +273,7 @@ list(InputPath) ->
 extract(InputPath, AVMElementNames, OutputDir) ->
     case file_type(InputPath) of
         avm ->
-            ParsedFiles = parse_file(InputPath, false, undefined, false),
+            ParsedFiles = parse_file(InputPath, false, undefined, true),
             write_files(filter_names(AVMElementNames, ParsedFiles), OutputDir);
         _ ->
             throw(io_lib:format("Expected AVM file: ~p", [InputPath]))
@@ -300,7 +300,7 @@ extract(InputPath, AVMElementNames, OutputDir) ->
 delete(OutputPath, InputPath, AVMElementNames) ->
     case file_type(InputPath) of
         avm ->
-            ParsedFiles = parse_file(InputPath, false, undefined, false),
+            ParsedFiles = parse_file(InputPath, false, undefined, true),
             write_packbeam(OutputPath, remove_names(AVMElementNames, ParsedFiles));
         _ ->
             throw(io_lib:format("Expected AVM file: ~p", [InputPath]))
@@ -687,10 +687,24 @@ parse_file(beam, _ModuleName, Lib, StartModule, Data, IncludeLines) ->
             {uncompressed_literals, UncompressedLiterals}
         ]
     ];
-parse_file(avm, ModuleName, Lib, StartModule, Data, _IncludeLines) ->
+parse_file(avm, ModuleName, Lib, StartModule, Data, IncludeLines) ->
     case Data of
         <<?AVM_HEADER, AVMData/binary>> ->
-            parse_avm_data(Lib, StartModule, AVMData);
+            lists:map(
+                fun(File) ->
+                    case {IncludeLines, is_beam(File)} of
+                        {false, true} ->
+                            {ok, _, Chunks} = beam_lib:all_chunks(get_element_data(File)),
+                            {ok, Binary} = beam_lib:build_module(
+                                lists:keydelete("Line", 1, Chunks)
+                            ),
+                            lists:keystore(data, 1, File, {data, Binary});
+                        _ ->
+                            File
+                    end
+                end,
+                parse_avm_data(Lib, StartModule, AVMData)
+            );
         _ ->
             throw(io_lib:format("Invalid AVM header: ~p", [ModuleName]))
     end;
